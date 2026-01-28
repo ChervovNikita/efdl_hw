@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from utils import Settings, Clothes, seed_everything
 from vit import ViT
+from profiler import Profile
 
 
 def get_vit_model() -> torch.nn.Module:
@@ -26,7 +27,7 @@ def get_vit_model() -> torch.nn.Module:
 
 
 def get_loaders() -> torch.utils.data.DataLoader:
-    dataset.download_extract_dataset()
+    # dataset.download_extract_dataset()
     train_transforms = dataset.get_train_transforms()
     val_transforms = dataset.get_val_transforms()
 
@@ -54,27 +55,37 @@ def run_epoch(model, train_loader, val_loader, criterion, optimizer) -> tp.Tuple
     epoch_loss, epoch_accuracy = 0, 0
     val_loss, val_accuracy = 0, 0
     model.train()
-    for data, label in tqdm(train_loader, desc="Train"):
-        data = data.to(Settings.device)
-        label = label.to(Settings.device)
-        output = model(data)
-        loss = criterion(output, label)
-        acc = (output.argmax(dim=1) == label).float().mean()
-        epoch_accuracy += acc.item() / len(train_loader)
-        epoch_loss += loss.item() / len(train_loader)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    with Profile(model, name="train", wait=1, warmup=2, active=3, repeat=2) as prof:
+        for data, label in tqdm(train_loader, desc="Train"):
+            data = data.to(Settings.device)
+            label = label.to(Settings.device)
+            output = model(data)
+            loss = criterion(output, label)
+            acc = (output.argmax(dim=1) == label).float().mean()
+            epoch_accuracy += acc.item() / len(train_loader)
+            epoch_loss += loss.item() / len(train_loader)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            prof.step()
+
+    torch.cuda.synchronize()
+    prof.to_perfetto("train.json")
 
     model.eval()
-    for data, label in tqdm(val_loader, desc="Val"):
-        data = data.to(Settings.device)
-        label = label.to(Settings.device)
-        output = model(data)
-        loss = criterion(output, label)
-        acc = (output.argmax(dim=1) == label).float().mean()
-        val_accuracy += acc.item() / len(train_loader)
-        val_loss += loss.item() / len(train_loader)
+    with Profile(model, name="val", wait=1, warmup=1, active=3, repeat=1) as prof:
+        for data, label in tqdm(val_loader, desc="Val"):
+            data = data.to(Settings.device)
+            label = label.to(Settings.device)
+            output = model(data)
+            loss = criterion(output, label)
+            acc = (output.argmax(dim=1) == label).float().mean()
+            val_accuracy += acc.item() / len(train_loader)
+            val_loss += loss.item() / len(train_loader)
+            prof.step()
+
+    torch.cuda.synchronize()
+    prof.to_perfetto("val.json")
 
     return epoch_loss, epoch_accuracy, val_loss, val_accuracy
 
