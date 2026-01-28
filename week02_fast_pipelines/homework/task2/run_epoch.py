@@ -1,7 +1,7 @@
 from enum import Enum
-from transformer import PositionalEncoding
+from transformer import PositionalEncoding, generate_square_subsequent_mask
 from torch import nn
-from dataset import BrainDataset, BigBrainDataset, UltraBigBrainDataset, UltraDuperBigBrainDataset, collate_fn, UltraBigBrainBatchSampler
+from dataset import BrainDataset, BigBrainDataset, UltraBigBrainDataset, UltraDuperBigBrainDatasetNaive, UltraDuperBigBrainDatasetFFD, UltraDuperBigBrainDatasetOBFD, collate_fn, UltraBigBrainBatchSampler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -17,7 +17,9 @@ class DataMode(Enum):
     BRAIN = 1
     BIG_BRAIN = 2
     ULTRA_BIG_BRAIN = 3
-    ULTRA_DUPER_BIG_BRAIN = 4
+    ULTRA_DUPER_BIG_BRAIN_NAIVE = 4
+    ULTRA_DUPER_BIG_BRAIN_FFD = 5
+    ULTRA_DUPER_BIG_BRAIN_OBFD = 6
 
 
 class GPT2LikeModel(torch.nn.Module):
@@ -30,16 +32,16 @@ class GPT2LikeModel(torch.nn.Module):
         self.embedding = torch.nn.Embedding(self.tokenizer_vocab, self.d_model)
         self.positional_encoding = PositionalEncoding(self.d_model)
         self.transformer_decoder = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(self.d_model, self.num_heads, self.d_hid),
+            nn.TransformerDecoderLayer(self.d_model, self.num_heads, self.d_hid, batch_first=True),
             num_layers=1,
         )
         self.linear = nn.Linear(self.d_hid, self.tokenizer_vocab)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, seq_mask=None) -> torch.Tensor:
         x = self.embedding(x) * math.sqrt(self.d_model)
         x = self.positional_encoding(x)
         memory = torch.zeros_like(x)
-        x = self.transformer_decoder(x, memory)
+        x = self.transformer_decoder(x, memory, tgt_mask=seq_mask)
         x = self.linear(x)
         return x
 
@@ -47,7 +49,7 @@ def get_gpt2_model() -> torch.nn.Module:
     return GPT2LikeModel()
 
 
-def run_epoch(data_mode: DataMode) -> None:
+def run_epoch(data_mode: DataMode, k=None) -> None:
     model = get_gpt2_model()
     model.to('cuda')
     model.train()
@@ -59,16 +61,22 @@ def run_epoch(data_mode: DataMode) -> None:
         dataset = BigBrainDataset(data_path='wikitext-103-raw-v1')
         dataloader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=collate_fn)
     elif data_mode == DataMode.ULTRA_BIG_BRAIN:
-        dataset = UltraBigBrainDataset(data_path='wikitext-103-raw-v1', k=50)
+        dataset = UltraBigBrainDataset(data_path='wikitext-103-raw-v1', k=k)
         bins = dataset.bins
         batch_sampler = UltraBigBrainBatchSampler(bins, batch_size=16)
         dataloader = DataLoader(dataset, batch_sampler=batch_sampler, collate_fn=collate_fn)
-    elif data_mode == DataMode.ULTRA_DUPER_BIG_BRAIN:
-        dataset = UltraDuperBigBrainDataset(data_path='wikitext-103-raw-v1')
-        dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+    elif data_mode == DataMode.ULTRA_DUPER_BIG_BRAIN_NAIVE:
+        dataset = UltraDuperBigBrainDatasetNaive(data_path='wikitext-103-raw-v1')
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+    elif data_mode == DataMode.ULTRA_DUPER_BIG_BRAIN_FFD:
+        dataset = UltraDuperBigBrainDatasetFFD(data_path='wikitext-103-raw-v1')
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+    elif data_mode == DataMode.ULTRA_DUPER_BIG_BRAIN_OBFD:
+        dataset = UltraDuperBigBrainDatasetOBFD(data_path='wikitext-103-raw-v1')
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
     else:
         assert False
-    
+
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
@@ -79,12 +87,22 @@ def run_epoch(data_mode: DataMode) -> None:
     losses = []
     loop = tqdm(dataloader, total=len(dataloader))
     times = []
-    for input_ids in loop:
+    for batch in loop:
         start_time = time.time()
+        if data_mode not in [DataMode.ULTRA_DUPER_BIG_BRAIN_NAIVE, DataMode.ULTRA_DUPER_BIG_BRAIN_FFD, DataMode.ULTRA_DUPER_BIG_BRAIN_OBFD]:
+            input_ids = batch.to('cuda')
+            seq_mask = generate_square_subsequent_mask(input_ids.shape[0])
+        else:
+            input_ids = batch['input_ids'].to('cuda')
+            seq_mask = batch['seq_mask'].to('cuda')[0]
+
         input_ids = input_ids.to('cuda')
         optimizer.zero_grad()
         with torch.amp.autocast('cuda', dtype=torch.float16):
-            outputs = model(input_ids)
+            if data_mode not in [DataMode.ULTRA_DUPER_BIG_BRAIN_NAIVE, DataMode.ULTRA_DUPER_BIG_BRAIN_FFD, DataMode.ULTRA_DUPER_BIG_BRAIN_OBFD]:
+                outputs = model(input_ids, None)
+            else:
+                outputs = model(input_ids, seq_mask)
             output_plain = outputs[:, :-1, :].reshape(-1, outputs.shape[-1])
             target_plain = input_ids[:, 1:].reshape(-1)
             is_pad_mask = (target_plain == tokenizer.pad_token_id)
@@ -99,9 +117,13 @@ def run_epoch(data_mode: DataMode) -> None:
             losses = []
         torch.cuda.synchronize()
         times.append(time.time() - start_time)
-    with open(f'{data_mode.name}.pkl', 'wb') as f:
+    path = f'{data_mode.name}'
+    if k is not None:
+        path += f'_k{k}'
+    path += '.pkl'
+    with open(path, 'wb') as f:
         pickle.dump({'times': times}, f)
 
 
 if __name__ == "__main__":
-    run_epoch(DataMode.ULTRA_BIG_BRAIN)
+    run_epoch(DataMode.ULTRA_DUPER_BIG_BRAIN_FFD)

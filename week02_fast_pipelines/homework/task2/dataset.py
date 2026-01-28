@@ -21,8 +21,8 @@ class BrainDataset(Dataset):
             if 'train' not in file:
                 continue
             data = open(os.path.join(data_path, file), 'r').readlines()
-            for text in tqdm(data[:10000]):
-                sample = self.tokenizer(text, padding="max_length", truncation=True, max_length=MAX_LENGTH)
+            for text in tqdm(data[:20000]):
+                sample = self.tokenizer(text, padding="max_length", truncation=True, max_length=max_length)
                 self.samples.append(torch.tensor(sample['input_ids']).long())
 
     def __len__(self):
@@ -40,8 +40,8 @@ class BigBrainDataset(BrainDataset):
             if 'train' not in file:
                 continue
             data = open(os.path.join(data_path, file), 'r').readlines()
-            for text in tqdm(data[:10000]):
-                sample = self.tokenizer(text, truncation=True, max_length=MAX_LENGTH)
+            for text in tqdm(data[:20000]):
+                sample = self.tokenizer(text, truncation=True, max_length=max_length)
                 self.samples.append(torch.tensor(sample['input_ids']).long())
 
 
@@ -54,19 +54,204 @@ class UltraBigBrainDataset(BrainDataset):
             if 'train' not in file:
                 continue
             data = open(os.path.join(data_path, file), 'r').readlines()
-            for text in tqdm(data[:10000]):
-                tokens = self.tokenizer(text, truncation=True, max_length=MAX_LENGTH)['input_ids']
+            for text in tqdm(data[:20000]):
+                tokens = self.tokenizer(text, truncation=True, max_length=max_length)['input_ids']
                 tokens = torch.tensor(tokens).long()
                 self.samples.append(tokens)
                 self.bins[(tokens.shape[0] - 1) // (k + 1)].append(len(self.samples)-1)
 
 
-class UltraDuperBigBrainDataset(Dataset):
+class UltraDuperBigBrainDatasetNaive(Dataset):
     def __init__(self, data_path: str, max_length: int = MAX_LENGTH):
-        pass
+        self.raw_samples = []
+        self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+        for file in os.listdir(data_path):
+            if 'train' not in file:
+                continue
+            data = open(os.path.join(data_path, file), 'r').readlines()
+            for text in tqdm(data[:20000]):
+                sample = self.tokenizer(text, truncation=True, max_length=max_length)
+                self.raw_samples.append(torch.tensor(sample['input_ids']).long())
+        self.final_samples = [torch.full((max_length,), self.tokenizer.pad_token_id, dtype=torch.long)]
+        self.shapes = [[]]
+        last_len = 0
+        for sample in self.raw_samples:
+            if last_len + sample.shape[0] <= max_length:
+                self.final_samples[-1][last_len:last_len+sample.shape[0]] = sample
+                last_len += sample.shape[0]
+                self.shapes[-1].append(sample.shape[0])
+            else:
+                keep_first = max_length - last_len
+                self.final_samples[-1][last_len:last_len+keep_first] = sample[:keep_first]
+                self.shapes[-1].append(keep_first)
+                self.final_samples.append(torch.full((max_length,), self.tokenizer.pad_token_id, dtype=torch.long))
+                self.shapes.append([])
+                self.final_samples[-1][:sample.shape[0]-keep_first] = sample[keep_first:]
+                last_len = sample.shape[0]-keep_first
+                self.shapes[-1].append(sample.shape[0]-keep_first)
+        
+        self.seq_masks = []
+        for shapes in self.shapes:
+            seq_mask = torch.ones(max_length, max_length) * float("-inf")
+            cur_begin = 0
+            for shape in shapes:
+                cur_end = cur_begin + shape
+                seq_mask[cur_begin:cur_end, cur_begin:cur_end] = torch.triu(torch.ones(shape, shape) * float("-inf"), diagonal=1)
+                cur_begin = cur_end
+            seq_mask[torch.arange(max_length), torch.arange(max_length)] = 0
+            self.seq_masks.append(torch.tensor(seq_mask))
 
+    def __len__(self):
+        return len(self.final_samples)
+
+    
     def __getitem__(self, idx: int):
-        pass
+        return {
+            'input_ids': self.final_samples[idx],
+            'seq_mask': self.seq_masks[idx]
+        }
+
+
+class UltraDuperBigBrainDatasetFFD(UltraDuperBigBrainDatasetNaive):
+    def __init__(self, data_path: str, max_length: int = MAX_LENGTH):
+        self.raw_samples = []
+        self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+        for file in os.listdir(data_path):
+            if 'train' not in file:
+                continue
+            data = open(os.path.join(data_path, file), 'r').readlines()
+            for text in tqdm(data[:20000]):
+                sample = self.tokenizer(text, truncation=True, max_length=max_length+1)
+                sample = torch.tensor(sample['input_ids']).long()
+                if sample.shape[0] > max_length:
+                    continue
+                self.raw_samples.append(sample[:max_length])
+        self.raw_samples.sort(key=lambda x: x.shape[0], reverse=True)
+        self.final_samples = []
+        self.shapes = []
+        current_lens = []
+        for sample in tqdm(self.raw_samples):
+            found = False
+            for i in range(len(current_lens)):
+                if current_lens[i] + sample.shape[0] <= max_length:
+                    self.shapes[i].append(sample.shape[0])
+                    self.final_samples[i][current_lens[i]:current_lens[i]+sample.shape[0]] = sample
+                    current_lens[i] += sample.shape[0]
+                    found = True
+                    break
+            if not found:
+                self.final_samples.append(torch.full((max_length,), self.tokenizer.pad_token_id, dtype=torch.long))
+                self.final_samples[-1][:sample.shape[0]] = sample
+                current_lens.append(sample.shape[0])
+                self.shapes.append([sample.shape[0]])
+
+        self.seq_masks = []
+        for shapes in self.shapes:
+            seq_mask = torch.ones(max_length, max_length) * float("-inf")
+            cur_begin = 0
+            for shape in shapes:
+                cur_end = cur_begin + shape
+                seq_mask[cur_begin:cur_end, cur_begin:cur_end] = torch.triu(torch.ones(shape, shape) * float("-inf"), diagonal=1)
+                cur_begin = cur_end
+            seq_mask[torch.arange(max_length), torch.arange(max_length)] = 0
+            self.seq_masks.append(torch.tensor(seq_mask))
+        print(self.shapes[::500])
+
+
+class STNode:
+    def __init__(self, start: int, end: int):
+        self.start = start
+        self.end = end
+        self.mid = (start + end) // 2
+        if self.start == self.end:
+            self.left = None
+            self.right = None
+        else:
+            self.left = STNode(start, self.mid)
+            self.right = STNode(self.mid+1, end)
+        self.value = 0
+
+
+def get_first(root: STNode, length: int):
+    if root.start == root.end:
+        if root.value:
+            return root.start
+        else:
+            return None
+    if length <= root.mid and root.left.value:
+        result = get_first(root.left, length)
+        if result is not None:
+            return result
+    return get_first(root.right, length)
+
+
+def update(root: STNode, v: int, counter: int):
+    if root.start == root.end:
+        root.value = counter
+        return
+    if v <= root.mid:
+        update(root.left, v, counter)
+    else:
+        update(root.right, v, counter)
+    root.value = root.left.value + root.right.value
+
+
+class UltraDuperBigBrainDatasetOBFD(UltraDuperBigBrainDatasetNaive):
+    def __init__(self, data_path: str, max_length: int = MAX_LENGTH):
+        self.raw_samples = []
+        self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+        for file in os.listdir(data_path):
+            if 'train' not in file:
+                continue
+            data = open(os.path.join(data_path, file), 'r').readlines()
+            for text in tqdm(data[:20000]):
+                sample = self.tokenizer(text, truncation=True, max_length=max_length+1)
+                sample = torch.tensor(sample['input_ids']).long()
+                if sample.shape[0] > max_length:
+                    continue
+                self.raw_samples.append(sample[:max_length])
+        self.raw_samples.sort(key=lambda x: x.shape[0], reverse=True)
+
+        start = 1
+        while start < max_length + 1:
+            start *= 2
+        self.root = STNode(0, start-1)
+
+        size_to_ids = defaultdict(list)
+
+        self.final_samples = []
+        self.shapes = []
+        current_lens = []
+        for sample in tqdm(self.raw_samples):
+            first_free = get_first(self.root, sample.shape[0])
+            if first_free is None:
+                self.final_samples.append(torch.full((max_length,), self.tokenizer.pad_token_id, dtype=torch.long))
+                self.final_samples[-1][:sample.shape[0]] = sample
+                current_lens.append(sample.shape[0])
+                self.shapes.append([sample.shape[0]])
+                size_to_ids[max_length-sample.shape[0]].append(len(self.final_samples)-1)
+                update(self.root, max_length-sample.shape[0], len(size_to_ids[max_length-sample.shape[0]]))
+                continue
+            i = size_to_ids[first_free].pop()
+            self.shapes[i].append(sample.shape[0])
+            self.final_samples[i][current_lens[i]:current_lens[i]+sample.shape[0]] = sample
+            current_lens[i] += sample.shape[0]
+            update(self.root, first_free, len(size_to_ids[first_free]))
+
+            size_to_ids[max_length-current_lens[i]].append(i)
+            update(self.root, max_length-current_lens[i], len(size_to_ids[max_length-current_lens[i]]))
+
+        self.seq_masks = []
+        for shapes in self.shapes:
+            seq_mask = torch.ones(max_length, max_length) * float("-inf")
+            cur_begin = 0
+            for shape in shapes:
+                cur_end = cur_begin + shape
+                seq_mask[cur_begin:cur_end, cur_begin:cur_end] = torch.triu(torch.ones(shape, shape) * float("-inf"), diagonal=1)
+                cur_begin = cur_end
+            seq_mask[torch.arange(max_length), torch.arange(max_length)] = 0
+            self.seq_masks.append(torch.tensor(seq_mask))
+        print(self.shapes[::500])
 
 
 def collate_fn(
