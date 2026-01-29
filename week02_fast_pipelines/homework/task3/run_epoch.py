@@ -51,11 +51,22 @@ def get_loaders() -> torch.utils.data.DataLoader:
     return train_loader, val_loader
 
 
-def run_epoch(model, train_loader, val_loader, criterion, optimizer) -> tp.Tuple[float, float]:
+def run_epoch(model, train_loader, val_loader, criterion, optimizer, profiler_type) -> tp.Tuple[float, float]:
     epoch_loss, epoch_accuracy = 0, 0
     val_loss, val_accuracy = 0, 0
     model.train()
-    with Profile(model, name="train", wait=1, warmup=2, active=3, repeat=2) as prof:
+    if profiler_type == 'my':
+        profiler = Profile(model, name="train", wait=1, warmup=2, active=3, repeat=2)
+    else:
+        profiler = torch.profiler.profile(
+            schedule=torch.profiler.schedule(wait=1, warmup=2, active=3, repeat=2),
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+
+    with profiler as prof:
         for data, label in tqdm(train_loader, desc="Train"):
             data = data.to(Settings.device)
             label = label.to(Settings.device)
@@ -70,10 +81,26 @@ def run_epoch(model, train_loader, val_loader, criterion, optimizer) -> tp.Tuple
             prof.step()
 
     torch.cuda.synchronize()
-    prof.to_perfetto("train.json")
+    
+    if profiler_type == 'my':
+        prof.to_perfetto("train.json")
+    else:
+        prof.export_chrome_trace("train_torch.json")
 
     model.eval()
-    with Profile(model, name="val", wait=1, warmup=1, active=3, repeat=1) as prof:
+
+    if profiler_type == 'my':
+        profiler = Profile(model, name="val", wait=1, warmup=1, active=3, repeat=1)
+    else:
+        profiler = torch.profiler.profile(
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+
+    with profiler as prof:
         for data, label in tqdm(val_loader, desc="Val"):
             data = data.to(Settings.device)
             label = label.to(Settings.device)
@@ -85,20 +112,23 @@ def run_epoch(model, train_loader, val_loader, criterion, optimizer) -> tp.Tuple
             prof.step()
 
     torch.cuda.synchronize()
-    prof.to_perfetto("val.json")
+    if profiler_type == 'my':
+        prof.to_perfetto("val.json")
+    else:
+        prof.export_chrome_trace("val_torch.json")
 
     return epoch_loss, epoch_accuracy, val_loss, val_accuracy
 
 
-def main():
+def main(profiler_type):
     seed_everything()
     model = get_vit_model()
     train_loader, val_loader = get_loaders()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=Settings.lr)
 
-    run_epoch(model, train_loader, val_loader, criterion, optimizer)
+    run_epoch(model, train_loader, val_loader, criterion, optimizer, profiler_type)
 
 
 if __name__ == "__main__":
-    main()
+    main(profiler_type='torch')
