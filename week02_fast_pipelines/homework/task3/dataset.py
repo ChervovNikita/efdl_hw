@@ -6,8 +6,11 @@ import gdown
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
+import torchvision.transforms.v2 as T
+import torch
 
 from utils import Clothes, get_labels_dict
+from torchvision.io import read_image, ImageReadMode
 
 
 class ClothesDataset(Dataset):
@@ -24,10 +27,10 @@ class ClothesDataset(Dataset):
 
     def __getitem__(self, idx):
         img_name = self.img_list[idx]
-        img = Image.open(f"{self.folder_path}/{img_name}.jpg").convert("RGB")
+        img = read_image(f"{self.folder_path}/{img_name}.jpg", mode=ImageReadMode.RGB)
+        # img = Image.open(f"{self.folder_path}/{img_name}.jpg").convert("RGB")
         img_transformed = self.transform(img)
         label = self.label2ix[self.frame.loc[img_name]["label"]]
-
         return img_transformed, label
 
 
@@ -51,12 +54,12 @@ def download_extract_dataset():
 def get_train_transforms() -> tp.Any:
     return transforms.Compose(
         [
-            transforms.Resize((320, 320)),
-            transforms.CenterCrop(224),
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.AugMix(),
-            transforms.ToTensor(),
+            T.Resize((320, 320)),
+            T.CenterCrop(224),
+            T.RandomResizedCrop(224),
+            T.RandomHorizontalFlip(),
+            T.AugMix(),
+            T.ToDtype(torch.float32, scale=True),
         ]
     )
 
@@ -64,8 +67,8 @@ def get_train_transforms() -> tp.Any:
 def get_val_transforms() -> tp.Any:
     return transforms.Compose(
         [
-            transforms.Resize((320, 320)),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
+            T.Resize((320, 320)),
+            T.CenterCrop(224),
+            T.ToDtype(torch.float32, scale=True),
         ]
     )

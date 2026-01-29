@@ -1,3 +1,13 @@
+# RESULTS
+
+task reports can be found in current root folder 
+
+task1_report.ipynb
+
+task2_report.ipynb
+
+task3_report.ipynb
+
 # Week 2 home assignment
 
 The assignment for this week consists of three parts. 

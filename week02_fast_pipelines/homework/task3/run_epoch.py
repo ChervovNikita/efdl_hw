@@ -45,15 +45,15 @@ def get_loaders() -> torch.utils.data.DataLoader:
     print(f"Train Data: {len(train_data)}")
     print(f"Val Data: {len(val_data)}")
 
-    train_loader = DataLoader(dataset=train_data, batch_size=Settings.batch_size, shuffle=True)
-    val_loader = DataLoader(dataset=val_data, batch_size=Settings.batch_size, shuffle=False)
+    train_loader = DataLoader(dataset=train_data, batch_size=Settings.batch_size, shuffle=True, num_workers=16, pin_memory=True)
+    val_loader = DataLoader(dataset=val_data, batch_size=Settings.batch_size, shuffle=False, num_workers=16, pin_memory=True)
 
     return train_loader, val_loader
 
 
 def run_epoch(model, train_loader, val_loader, criterion, optimizer, profiler_type) -> tp.Tuple[float, float]:
-    epoch_loss, epoch_accuracy = 0, 0
-    val_loss, val_accuracy = 0, 0
+    epoch_loss, epoch_accuracy = torch.tensor(0.0, device=Settings.device), torch.tensor(0.0, device=Settings.device)
+    val_loss, val_accuracy = torch.tensor(0.0, device=Settings.device), torch.tensor(0.0, device=Settings.device)
     model.train()
     if profiler_type == 'my':
         profiler = Profile(model, name="train", wait=1, warmup=2, active=3, repeat=2)
@@ -61,24 +61,29 @@ def run_epoch(model, train_loader, val_loader, criterion, optimizer, profiler_ty
         profiler = torch.profiler.profile(
             schedule=torch.profiler.schedule(wait=1, warmup=2, active=3, repeat=2),
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-            record_shapes=True,
-            profile_memory=True,
+            record_shapes=False,
+            profile_memory=False,
             with_stack=True,
         )
 
+    scaler = torch.cuda.amp.GradScaler()
+    
     with profiler as prof:
         for data, label in tqdm(train_loader, desc="Train"):
-            data = data.to(Settings.device)
-            label = label.to(Settings.device)
-            output = model(data)
-            loss = criterion(output, label)
+            data = data.to(Settings.device, non_blocking=True)
+            label = label.to(Settings.device, non_blocking=True)
+            with torch.amp.autocast('cuda', dtype=torch.float16):
+                output = model(data)
+                loss = criterion(output, label)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             acc = (output.argmax(dim=1) == label).float().mean()
-            epoch_accuracy += acc.item() / len(train_loader)
-            epoch_loss += loss.item() / len(train_loader)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            epoch_accuracy += acc.detach()
+            epoch_loss += loss.detach()
             prof.step()
+    epoch_accuracy = epoch_accuracy.detach().cpu().item() / len(train_loader)
+    epoch_loss = epoch_loss.detach().cpu().item() / len(train_loader)
 
     torch.cuda.synchronize()
     
@@ -95,21 +100,26 @@ def run_epoch(model, train_loader, val_loader, criterion, optimizer, profiler_ty
         profiler = torch.profiler.profile(
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-            record_shapes=True,
-            profile_memory=True,
+            record_shapes=False,
+            profile_memory=False,
             with_stack=True,
         )
 
     with profiler as prof:
-        for data, label in tqdm(val_loader, desc="Val"):
-            data = data.to(Settings.device)
-            label = label.to(Settings.device)
-            output = model(data)
-            loss = criterion(output, label)
-            acc = (output.argmax(dim=1) == label).float().mean()
-            val_accuracy += acc.item() / len(train_loader)
-            val_loss += loss.item() / len(train_loader)
-            prof.step()
+        with torch.no_grad():
+            for data, label in tqdm(val_loader, desc="Val"):
+                data = data.to(Settings.device, non_blocking=True)
+                label = label.to(Settings.device, non_blocking=True)
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    output = model(data)
+                    loss = criterion(output, label)
+                acc = (output.argmax(dim=1) == label).float().mean()
+                val_accuracy += acc.detach()
+                val_loss += loss.detach().item()
+                prof.step()
+    
+    val_accuracy = val_accuracy.detach().cpu().item() / len(val_loader)
+    val_loss = val_loss.detach().cpu().item() / len(val_loader)
 
     torch.cuda.synchronize()
     if profiler_type == 'my':
@@ -126,9 +136,9 @@ def main(profiler_type):
     train_loader, val_loader = get_loaders()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=Settings.lr)
-
     run_epoch(model, train_loader, val_loader, criterion, optimizer, profiler_type)
+    return
 
 
 if __name__ == "__main__":
-    main(profiler_type='torch')
+    main(profiler_type='my')
