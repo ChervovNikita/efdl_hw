@@ -83,7 +83,7 @@ def run_epoch(data_mode: DataMode, k=None) -> None:
 
     scaler = torch.cuda.amp.GradScaler()
 
-    i = 0
+    # i = 0
     losses = []
     loop = tqdm(dataloader, total=len(dataloader))
     times = []
@@ -98,23 +98,24 @@ def run_epoch(data_mode: DataMode, k=None) -> None:
 
         input_ids = input_ids.to('cuda')
         optimizer.zero_grad()
-        with torch.amp.autocast('cuda', dtype=torch.float16):
-            if data_mode not in [DataMode.ULTRA_DUPER_BIG_BRAIN_NAIVE, DataMode.ULTRA_DUPER_BIG_BRAIN_FFD, DataMode.ULTRA_DUPER_BIG_BRAIN_OBFD]:
-                outputs = model(input_ids, None)
-            else:
-                outputs = model(input_ids, seq_mask)
-            output_plain = outputs[:, :-1, :].reshape(-1, outputs.shape[-1])
-            target_plain = input_ids[:, 1:].reshape(-1)
-            is_pad_mask = (target_plain == tokenizer.pad_token_id)
-            loss = criterion(output_plain[~is_pad_mask], target_plain[~is_pad_mask])
-            losses.append(loss.item())
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        i += 1
-        if i % 100 == 0:
-            loop.set_description(f"Loss: {round(sum(losses) / len(losses), 4)}")
-            losses = []
+        with torch.no_grad():
+            with torch.amp.autocast('cuda', dtype=torch.float16):
+                if data_mode not in [DataMode.ULTRA_DUPER_BIG_BRAIN_NAIVE, DataMode.ULTRA_DUPER_BIG_BRAIN_FFD, DataMode.ULTRA_DUPER_BIG_BRAIN_OBFD]:
+                    outputs = model(input_ids, None)
+                else:
+                    outputs = model(input_ids, seq_mask)
+                output_plain = outputs[:, :-1, :].reshape(-1, outputs.shape[-1])
+                # target_plain = input_ids[:, 1:].reshape(-1)
+                # is_pad_mask = (target_plain == tokenizer.pad_token_id)
+                # loss = criterion(output_plain[~is_pad_mask], target_plain[~is_pad_mask])
+                # losses.append(loss.item())
+        # scaler.scale(loss).backward()
+        # scaler.step(optimizer)
+        # scaler.update()
+        # i += 1
+        # if i % 100 == 0:
+        #     loop.set_description(f"Loss: {round(sum(losses) / len(losses), 4)}")
+        #     losses = []
         torch.cuda.synchronize()
         times.append(time.time() - start_time)
     path = f'{data_mode.name}'

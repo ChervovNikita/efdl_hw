@@ -21,7 +21,7 @@ class BrainDataset(Dataset):
             if 'train' not in file:
                 continue
             data = open(os.path.join(data_path, file), 'r').readlines()
-            for text in tqdm(data[:20000]):
+            for text in tqdm(data):
                 sample = self.tokenizer(text, padding="max_length", truncation=True, max_length=max_length)
                 self.samples.append(torch.tensor(sample['input_ids']).long())
 
@@ -40,7 +40,7 @@ class BigBrainDataset(BrainDataset):
             if 'train' not in file:
                 continue
             data = open(os.path.join(data_path, file), 'r').readlines()
-            for text in tqdm(data[:20000]):
+            for text in tqdm(data):
                 sample = self.tokenizer(text, truncation=True, max_length=max_length)
                 self.samples.append(torch.tensor(sample['input_ids']).long())
 
@@ -54,7 +54,7 @@ class UltraBigBrainDataset(BrainDataset):
             if 'train' not in file:
                 continue
             data = open(os.path.join(data_path, file), 'r').readlines()
-            for text in tqdm(data[:20000]):
+            for text in tqdm(data):
                 tokens = self.tokenizer(text, truncation=True, max_length=max_length)['input_ids']
                 tokens = torch.tensor(tokens).long()
                 self.samples.append(tokens)
@@ -64,12 +64,13 @@ class UltraBigBrainDataset(BrainDataset):
 class UltraDuperBigBrainDatasetNaive(Dataset):
     def __init__(self, data_path: str, max_length: int = MAX_LENGTH):
         self.raw_samples = []
+        self.max_length = max_length
         self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         for file in os.listdir(data_path):
             if 'train' not in file:
                 continue
             data = open(os.path.join(data_path, file), 'r').readlines()
-            for text in tqdm(data[:20000]):
+            for text in tqdm(data):
                 sample = self.tokenizer(text, truncation=True, max_length=max_length)
                 self.raw_samples.append(torch.tensor(sample['input_ids']).long())
         self.final_samples = [torch.full((max_length,), self.tokenizer.pad_token_id, dtype=torch.long)]
@@ -89,38 +90,46 @@ class UltraDuperBigBrainDatasetNaive(Dataset):
                 self.final_samples[-1][:sample.shape[0]-keep_first] = sample[keep_first:]
                 last_len = sample.shape[0]-keep_first
                 self.shapes[-1].append(sample.shape[0]-keep_first)
-        
-        self.seq_masks = []
-        for shapes in self.shapes:
-            seq_mask = torch.ones(max_length, max_length) * float("-inf")
-            cur_begin = 0
-            for shape in shapes:
-                cur_end = cur_begin + shape
-                seq_mask[cur_begin:cur_end, cur_begin:cur_end] = torch.triu(torch.ones(shape, shape) * float("-inf"), diagonal=1)
-                cur_begin = cur_end
-            seq_mask[torch.arange(max_length), torch.arange(max_length)] = 0
-            self.seq_masks.append(torch.tensor(seq_mask))
+        # self.seq_masks = []
+        # for shapes in self.shapes:
+        #     seq_mask = torch.ones(max_length, max_length) * float("-inf")
+        #     cur_begin = 0
+        #     for shape in shapes:
+        #         cur_end = cur_begin + shape
+        #         seq_mask[cur_begin:cur_end, cur_begin:cur_end] = torch.triu(torch.ones(shape, shape) * float("-inf"), diagonal=1)
+        #         cur_begin = cur_end
+        #     seq_mask[torch.arange(max_length), torch.arange(max_length)] = 0
+        #     self.seq_masks.append(torch.tensor(seq_mask))
 
     def __len__(self):
         return len(self.final_samples)
 
     
     def __getitem__(self, idx: int):
+        shapes = self.shapes[idx]
+        seq_mask = torch.ones(self.max_length, self.max_length) * float("-inf")
+        cur_begin = 0
+        for shape in shapes:    
+            cur_end = cur_begin + shape
+            seq_mask[cur_begin:cur_end, cur_begin:cur_end] = torch.triu(torch.ones(shape, shape) * float("-inf"), diagonal=1)
+            cur_begin = cur_end
+        seq_mask[torch.arange(self.max_length), torch.arange(self.max_length)] = 0
         return {
             'input_ids': self.final_samples[idx],
-            'seq_mask': self.seq_masks[idx]
+            'seq_mask': torch.tensor(seq_mask)
         }
 
 
 class UltraDuperBigBrainDatasetFFD(UltraDuperBigBrainDatasetNaive):
     def __init__(self, data_path: str, max_length: int = MAX_LENGTH):
         self.raw_samples = []
+        self.max_length = max_length
         self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         for file in os.listdir(data_path):
             if 'train' not in file:
                 continue
             data = open(os.path.join(data_path, file), 'r').readlines()
-            for text in tqdm(data[:20000]):
+            for text in tqdm(data):
                 sample = self.tokenizer(text, truncation=True, max_length=max_length+1)
                 sample = torch.tensor(sample['input_ids']).long()
                 if sample.shape[0] > max_length:
@@ -130,32 +139,31 @@ class UltraDuperBigBrainDatasetFFD(UltraDuperBigBrainDatasetNaive):
         self.final_samples = []
         self.shapes = []
         current_lens = []
+        current_lens_torch = torch.zeros(len(self.raw_samples))
         for sample in tqdm(self.raw_samples):
-            found = False
-            for i in range(len(current_lens)):
-                if current_lens[i] + sample.shape[0] <= max_length:
-                    self.shapes[i].append(sample.shape[0])
-                    self.final_samples[i][current_lens[i]:current_lens[i]+sample.shape[0]] = sample
-                    current_lens[i] += sample.shape[0]
-                    found = True
-                    break
-            if not found:
+            i = (current_lens_torch[:len(self.final_samples)+1] + sample.shape[0] <= max_length).int().argmax().item()
+            if i < len(self.final_samples):
+                self.shapes[i].append(sample.shape[0])
+                self.final_samples[i][current_lens[i]:current_lens[i]+sample.shape[0]] = sample
+                current_lens[i] += sample.shape[0]
+                current_lens_torch[i] += sample.shape[0]
+            else:
                 self.final_samples.append(torch.full((max_length,), self.tokenizer.pad_token_id, dtype=torch.long))
                 self.final_samples[-1][:sample.shape[0]] = sample
                 current_lens.append(sample.shape[0])
+                current_lens_torch[len(current_lens)-1] = sample.shape[0]
                 self.shapes.append([sample.shape[0]])
 
-        self.seq_masks = []
-        for shapes in self.shapes:
-            seq_mask = torch.ones(max_length, max_length) * float("-inf")
-            cur_begin = 0
-            for shape in shapes:
-                cur_end = cur_begin + shape
-                seq_mask[cur_begin:cur_end, cur_begin:cur_end] = torch.triu(torch.ones(shape, shape) * float("-inf"), diagonal=1)
-                cur_begin = cur_end
-            seq_mask[torch.arange(max_length), torch.arange(max_length)] = 0
-            self.seq_masks.append(torch.tensor(seq_mask))
-        print(self.shapes[::500])
+        # self.seq_masks = []
+        # for shapes in tqdm(self.shapes):
+        #     seq_mask = torch.ones(max_length, max_length) * float("-inf")
+        #     cur_begin = 0
+        #     for shape in shapes:
+        #         cur_end = cur_begin + shape
+        #         seq_mask[cur_begin:cur_end, cur_begin:cur_end] = torch.triu(torch.ones(shape, shape) * float("-inf"), diagonal=1)
+        #         cur_begin = cur_end
+        #     seq_mask[torch.arange(max_length), torch.arange(max_length)] = 0
+        #     self.seq_masks.append(torch.tensor(seq_mask))
 
 
 class STNode:
@@ -199,12 +207,13 @@ def update(root: STNode, v: int, counter: int):
 class UltraDuperBigBrainDatasetOBFD(UltraDuperBigBrainDatasetNaive):
     def __init__(self, data_path: str, max_length: int = MAX_LENGTH):
         self.raw_samples = []
+        self.max_length = max_length
         self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         for file in os.listdir(data_path):
             if 'train' not in file:
                 continue
             data = open(os.path.join(data_path, file), 'r').readlines()
-            for text in tqdm(data[:20000]):
+            for text in tqdm(data):
                 sample = self.tokenizer(text, truncation=True, max_length=max_length+1)
                 sample = torch.tensor(sample['input_ids']).long()
                 if sample.shape[0] > max_length:
@@ -241,17 +250,16 @@ class UltraDuperBigBrainDatasetOBFD(UltraDuperBigBrainDatasetNaive):
             size_to_ids[max_length-current_lens[i]].append(i)
             update(self.root, max_length-current_lens[i], len(size_to_ids[max_length-current_lens[i]]))
 
-        self.seq_masks = []
-        for shapes in self.shapes:
-            seq_mask = torch.ones(max_length, max_length) * float("-inf")
-            cur_begin = 0
-            for shape in shapes:
-                cur_end = cur_begin + shape
-                seq_mask[cur_begin:cur_end, cur_begin:cur_end] = torch.triu(torch.ones(shape, shape) * float("-inf"), diagonal=1)
-                cur_begin = cur_end
-            seq_mask[torch.arange(max_length), torch.arange(max_length)] = 0
-            self.seq_masks.append(torch.tensor(seq_mask))
-        print(self.shapes[::500])
+        # self.seq_masks = []
+        # for shapes in self.shapes:
+        #     seq_mask = torch.ones(max_length, max_length) * float("-inf")
+        #     cur_begin = 0
+        #     for shape in shapes:
+        #         cur_end = cur_begin + shape
+        #         seq_mask[cur_begin:cur_end, cur_begin:cur_end] = torch.triu(torch.ones(shape, shape) * float("-inf"), diagonal=1)
+        #         cur_begin = cur_end
+        #     seq_mask[torch.arange(max_length), torch.arange(max_length)] = 0
+        #     self.seq_masks.append(torch.tensor(seq_mask))
 
 
 def collate_fn(
