@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision.datasets import CIFAR100
 from syncbn import SyncBatchNorm
 import time
@@ -36,8 +37,7 @@ class Net(nn.Module):
         self.dropout2 = nn.Dropout(0.5)
         self.fc1 = nn.Linear(6272, 128)
         self.fc2 = nn.Linear(128, 100)
-        # self.bn1 = nn.BatchNorm1d(128, affine=False)  # to be replaced with SyncBatchNorm
-        self.bn1 = SyncBatchNorm(128)
+        self.bn1 = nn.SyncBatchNorm(128, affine=False)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -83,10 +83,10 @@ def run_training(rank, size):
     loader = DataLoader(dataset, sampler=DistributedSampler(dataset, size, rank), batch_size=64)
 
     model = Net()
-    # device = torch.device("cuda")  # replace with "cuda" afterwards
     device = torch.device("cuda", rank)
     model.to(device)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
+    ddp_model = DDP(model, device_ids=[rank], output_device=rank)
+    optimizer = torch.optim.SGD(ddp_model.parameters(), lr=0.01, momentum=0.5)
 
     num_batches = len(loader)
 
@@ -94,6 +94,7 @@ def run_training(rank, size):
 
     torch.cuda.reset_peak_memory_stats()
     start = time.time()
+
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
         profile_memory=True,
@@ -103,6 +104,7 @@ def run_training(rank, size):
     ) as prof:
         for _ in range(10):
             accuracies = []
+            
             epoch_loss = torch.zeros((1,), device=device)
             
             i = 0
@@ -110,13 +112,16 @@ def run_training(rank, size):
                 data = data.to(device)
                 target = target.to(device)
 
-                output = model(data)
-                loss = torch.nn.functional.cross_entropy(output, target)
-                epoch_loss += (loss / accumulate_steps).detach()
-                loss.backward()
+                should_sync = (step + 1) % accumulate_steps == 0 or step == num_batches - 1
+                ctx = torch.enable_grad() if should_sync else ddp_model.no_sync()
 
-                if (step + 1) % accumulate_steps == 0 or step == num_batches - 1:
-                    average_gradients(model)
+                with ctx:
+                    output = ddp_model(data)
+                    loss = torch.nn.functional.cross_entropy(output, target)
+                    epoch_loss += (loss / accumulate_steps).detach()
+                    loss.backward()
+
+                if should_sync:
                     optimizer.step()
                     optimizer.zero_grad()
 
@@ -131,12 +136,12 @@ def run_training(rank, size):
                 prof.step()
             if rank == 0:
                 print(f"accuracy: {torch.mean(torch.stack(accuracies))}")
-            # where's the validation loop?
+    
     torch.cuda.synchronize()
     end = time.time()
     print(f"Time: {end - start}")
     print("Max allocated", torch.cuda.max_memory_allocated() / 1024**2)
-    prof.export_chrome_trace(f"trace_my_rank{rank}.json")
+    prof.export_chrome_trace(f"trace_pytorch_rank{rank}.json")
 
 
 if __name__ == "__main__":
