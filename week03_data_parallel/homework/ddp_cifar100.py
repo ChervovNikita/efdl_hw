@@ -8,6 +8,7 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.datasets import CIFAR100
+from syncbn import SyncBatchNorm
 
 torch.set_num_threads(1)
 
@@ -33,7 +34,8 @@ class Net(nn.Module):
         self.dropout2 = nn.Dropout(0.5)
         self.fc1 = nn.Linear(6272, 128)
         self.fc2 = nn.Linear(128, 100)
-        self.bn1 = nn.BatchNorm1d(128, affine=False)  # to be replaced with SyncBatchNorm
+        # self.bn1 = nn.BatchNorm1d(128, affine=False)  # to be replaced with SyncBatchNorm
+        self.bn1 = SyncBatchNorm(128)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -78,34 +80,43 @@ def run_training(rank, size):
     loader = DataLoader(dataset, sampler=DistributedSampler(dataset, size, rank), batch_size=64)
 
     model = Net()
-    device = torch.device("cpu")  # replace with "cuda" afterwards
+    # device = torch.device("cuda")  # replace with "cuda" afterwards
+    device = torch.device("cuda", rank)
     model.to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
 
     num_batches = len(loader)
 
+    accumulate_steps = 2
+
     for _ in range(10):
         epoch_loss = torch.zeros((1,), device=device)
-
-        for data, target in loader:
+        
+        i = 0
+        for step, (data, target) in enumerate(loader):
             data = data.to(device)
             target = target.to(device)
 
-            optimizer.zero_grad()
             output = model(data)
             loss = torch.nn.functional.cross_entropy(output, target)
-            epoch_loss += loss.detach()
+            epoch_loss += (loss / accumulate_steps).detach()
             loss.backward()
-            average_gradients(model)
-            optimizer.step()
+
+            if (step + 1) % accumulate_steps == 0 or step == num_batches - 1:
+                average_gradients(model)
+                optimizer.step()
+                optimizer.zero_grad()
 
             acc = (output.argmax(dim=1) == target).float().mean()
 
-            print(f"Rank {dist.get_rank()}, loss: {epoch_loss / num_batches}, acc: {acc}")
+            if rank == 0:
+                i += 1
+                if i % 100 == 0:
+                    print(f"Rank {dist.get_rank()}, loss: {epoch_loss / len(loader)}, acc: {acc}")
             epoch_loss = 0
         # where's the validation loop?
 
 
 if __name__ == "__main__":
     local_rank = int(os.environ["LOCAL_RANK"])
-    init_process(local_rank, fn=run_training, backend="gloo")  # replace with "nccl" when testing on several GPUs
+    init_process(local_rank, fn=run_training, backend="nccl")  # replace with "nccl" when testing on several GPUs
