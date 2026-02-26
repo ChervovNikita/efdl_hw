@@ -279,26 +279,34 @@ class FSDPModule:
         if self._sharded_state == ShardedState.UNSHARDED:
             return  # no-op
         with record_function(self.with_fqn("FSDP::all_gather")):
-            # TODO(task1): gather the parameters shards (cast to `param_dtype`) for each parameter
-            param_all_gather_outputs = []
-            for param in self.fsdp_params:
-                my_parameter = param.sharded_param.data.to_local()
-                if param.param_dtype is not None:
-                    my_parameter = my_parameter.to(param.param_dtype)
-                my_parameter = my_parameter.contiguous()
-                result = torch.zeros(param.orig_size, dtype=my_parameter.dtype, device=my_parameter.device)
-                torch.distributed.all_gather_into_tensor(result, my_parameter, group=param.mesh.get_group())
-                param_all_gather_outputs.append(result)
-
+            with self.comm_ctx.device_handle.stream(self.comm_ctx.all_gather_stream):
+                # TODO(task1): gather the parameters shards (cast to `param_dtype`) for each parameter
+                param_all_gather_outputs = []
+                for param in self.fsdp_params:
+                    my_parameter = param.sharded_param.data.to_local()
+                    if param.param_dtype is not None:
+                        my_parameter = my_parameter.to(param.param_dtype)
+                    my_parameter = my_parameter.contiguous()
+                    result = torch.zeros(param.orig_size, dtype=my_parameter.dtype, device=my_parameter.device)
+                    torch.distributed.all_gather_into_tensor(result, my_parameter, group=param.mesh.get_group())
+                    param_all_gather_outputs.append(result)
+                # TODO(task2): create an event which marks the end of all-gather
+                # and save it in `AllGatherResult`
+                all_gather_event = self.comm_ctx.device_handle.Event()
+                all_gather_event.record()
             self._all_gather_result = AllGatherResult(
                 param_all_gather_outputs=param_all_gather_outputs,
+                all_gather_event=all_gather_event,
             )
-
-            # TODO(task2): create an event which marks the end of all-gather
-            # and save it in `AllGatherResult`
 
     def wait_for_unshard(self):
         # TODO(task2): wait for the end of the all-gather launched by `unshard`
+
+        if self._all_gather_result.all_gather_event is not None:
+            self.comm_ctx.device_handle.current_stream().wait_event(
+                self._all_gather_result.all_gather_event
+            )
+
         # TODO(task1): for each parameter:
         #   - allocate its unsharded paramter
         #   - copy the all-gather output into it
@@ -315,6 +323,10 @@ class FSDPModule:
         self._sharded_state = ShardedState.UNSHARDED
         # TODO(task2): block all-gather stream until copy is complete,
         # so it doesn't interfere with the next unshard
+
+        self.comm_ctx.all_gather_stream.wait_stream(
+            self.comm_ctx.device_handle.current_stream()
+        )
 
     def reshard(self):
         # TODO(bonus1): do nothing if called during forward adn self._reshard_after_forward is True
