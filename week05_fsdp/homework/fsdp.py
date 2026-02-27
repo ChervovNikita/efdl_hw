@@ -362,6 +362,16 @@ class FSDPModule:
     def _backward_prefetch(self) -> None:
         # TODO(task3): using `self._post_forward_indices` and `self.comm_ctx.post_forward_order`
         # find the right FSDPModule to prefetch
+
+        target_fsdp_module = None
+        for index in self._post_forward_indices:
+            if index > 0:
+                target_fsdp_module = self.comm_ctx.post_forward_order[index - 1]
+                break
+
+        if target_fsdp_module is None:
+            return
+
         self._prefetch_unshard(target_fsdp_module)
 
     @staticmethod
@@ -418,7 +428,7 @@ def pre_backward(module: FSDPModule, grad: torch.Tensor):
         module._training_state = TrainingState.PRE_BACKWARD
         module.unshard()  # no-op if prefetched
         module.wait_for_unshard()
-        # module._backward_prefetch()
+        module._backward_prefetch()
         # TODO(task3): uncomment the next line
     return grad
 
@@ -441,29 +451,39 @@ def post_backward(module: FSDPModule):
         #   - cast the parameter gradients to reduce dtype
         #   - delete the unsharded parameter grad
         
-        grads = []
-        for param in module.fsdp_params:
-            my_grad = param.unsharded_param.grad.data
-            if param.reduce_dtype is not None:
-                my_grad = my_grad.to(param.reduce_dtype)
-            param.unsharded_param.grad = None
-            grads.append(my_grad)
-        
-        # TODO(task3): now block current stream until reduce-scatter stream finishes the copy
-        # TODO(task1): reduce-scatter the gradients and assign the reduced grad shards to `sharded_param.grad`s
-        # (casting them to `orig_dtype`)
+        default_stream = module.comm_ctx.device_handle.current_stream()
+        with module.comm_ctx.device_handle.stream(module.comm_ctx.reduce_scatter_stream):
+            module.comm_ctx.reduce_scatter_stream.wait_stream(default_stream)
+            
+            grads = []
+            for param in module.fsdp_params:
+                my_grad = param.unsharded_param.grad.data
+                if param.reduce_dtype is not None:
+                    my_grad = my_grad.to(param.reduce_dtype)
+                param.unsharded_param.grad = None
+                grads.append(my_grad)
+            
+            # TODO(task3): now block current stream until reduce-scatter stream finishes the copy
+            # TODO(task1): reduce-scatter the gradients and assign the reduced grad shards to `sharded_param.grad`s
+            # (casting them to `orig_dtype`)
 
-        for grad, param in zip(grads, module.fsdp_params):
-            my_grad = torch.zeros(param.sharded_size, dtype=grad.dtype, device=grad.device)
-            torch.distributed.reduce_scatter_tensor(my_grad, grad.contiguous(), op=torch.distributed.ReduceOp.SUM, group=param.mesh.get_group())
-            my_grad.div_(param.mesh.size())
-            if param.orig_dtype is not None:
-                my_grad = my_grad.to(param.orig_dtype)
-            param.sharded_param.grad = param.to_sharded_dtensor(my_grad)
+            # module.comm_ctx.reduce_scatter_stream.wait_stream(module.comm_ctx.device_handle.current_stream())
 
-        # TODO(task3): create an event which marks the end of the reduce-scatter
-        # and save it to `_post_reduce_event` to wait for it
-        # when the whole backward finishes (in the final callback)
+            for grad, param in zip(grads, module.fsdp_params):
+                grad.record_stream(module.comm_ctx.reduce_scatter_stream)
+                my_grad = torch.zeros(param.sharded_size, dtype=grad.dtype, device=grad.device)
+                torch.distributed.reduce_scatter_tensor(my_grad, grad.contiguous(), op=torch.distributed.ReduceOp.SUM, group=param.mesh.get_group())
+                my_grad.div_(param.mesh.size())
+                if param.orig_dtype is not None:
+                    my_grad = my_grad.to(param.orig_dtype)
+                param.sharded_param.grad = param.to_sharded_dtensor(my_grad)
+
+            # TODO(task3): create an event which marks the end of the reduce-scatter
+            # and save it to `_post_reduce_event` to wait for it
+            # when the whole backward finishes (in the final callback)
+
+            module._post_reduce_event = module.comm_ctx.device_handle.Event()
+            module._post_reduce_event.record()
 
 
 def register_pre_backward_hook(hook: Callable, output: Any) -> Any:
