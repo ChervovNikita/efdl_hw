@@ -458,10 +458,10 @@ def post_backward(module: FSDPModule):
             grads = []
             for param in module.fsdp_params:
                 my_grad = param.unsharded_param.grad.data
-                if param.reduce_dtype is not None:
-                    my_grad = my_grad.to(param.reduce_dtype)
+                right_stream_my_grad = torch.empty_like(my_grad, dtype=param.reduce_dtype or my_grad.dtype, device=my_grad.device)
+                right_stream_my_grad.copy_(my_grad)
                 param.unsharded_param.grad = None
-                grads.append(my_grad)
+                grads.append(right_stream_my_grad)
             
             # TODO(task3): now block current stream until reduce-scatter stream finishes the copy
             # TODO(task1): reduce-scatter the gradients and assign the reduced grad shards to `sharded_param.grad`s
