@@ -52,8 +52,6 @@ def ademamix_foreach_fn(
     # torch._foreach_addcmul_(exp_avg_sqs, grads, grads, 1 - beta2)
     # etc.
 
-    step.add_(1)
-
     bias_correction1 = (1 - torch.pow(beta1_t, step))
     bias_correction2 = (1 - torch.pow(beta2_t, step))
 
@@ -81,7 +79,7 @@ def ademamix_foreach_fn(
             -lr)
     )
 
- 
+
 class AdEMAMix(Optimizer):
     r"""Implements the AdEMAMix algorithm.
 
@@ -179,6 +177,8 @@ class AdEMAMix(Optimizer):
             beta2_t = torch.tensor(beta2, device='cpu', dtype=torch.float64)
             beta3_final_t = torch.tensor(beta3_final, device='cpu', dtype=torch.float64)
 
+            group_step += 1
+            
             ademamix_foreach_fn(
                 params=params,
                 grads=grads,
@@ -202,7 +202,5 @@ class AdEMAMix(Optimizer):
                 self.state[p]['exp_avg_fast'] = exp_avg_fasts[i]
                 self.state[p]['exp_avg_slow'] = exp_avg_slows[i]
                 self.state[p]['exp_avg_sq'] = exp_avg_sqs[i]
-        
-            group['step'] = group_step
 
         return loss
