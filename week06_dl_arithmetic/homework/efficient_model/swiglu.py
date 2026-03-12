@@ -67,9 +67,11 @@ def _swiglu_backward_kernel(dc_ptr, a_ptr, b_ptr, stride, n_cols: tl.constexpr, 
     silu_a = a_row * sig_a
     db_row = dc_row * silu_a
     da_row = dc_row * (alpha * silu_a * (1 - sig_a) + sig_a) * (b_row + 1)
+    dc_row = silu_a * (b_row + 1)
 
     tl.store(a_ptr + col_offsets, da_row, mask=mask)
     tl.store(b_ptr + col_offsets, db_row, mask=mask)
+    tl.store(dc_ptr + col_offsets, dc_row, mask=mask)
     # HINT: We're already recomputing values here.
     # Could a third store here help avoid saving something else?
 
@@ -118,7 +120,7 @@ def swiglu_backward(a, b, dc, alpha, limit):
         alpha=alpha,
         limit=limit,
     )
-    return a.view(*ori_shape), b.view(*ori_shape)
+    return a.view(*ori_shape), b.view(*ori_shape), dc.view(*ori_shape)
 
 
 class MemoryEfficientSwiGLUMLP(torch.autograd.Function):
@@ -137,7 +139,7 @@ class MemoryEfficientSwiGLUMLP(torch.autograd.Function):
         out = activation_out @ w_down.T
 
         # TODO: Save tensors for backward
-        ctx.save_for_backward(gate, up, w_down, x, activation_out)  # TODO: fill this
+        ctx.save_for_backward(gate, up, w_down, x, w_gate, w_up)  # TODO: fill this
         ctx.alpha = alpha
         ctx.limit = limit
 
@@ -146,21 +148,24 @@ class MemoryEfficientSwiGLUMLP(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         # TODO: Implement backward pass
-        gate, up, w_down, x, activation_out = ctx.saved_tensors
+        gate, up, w_down, x, w_gate, w_up = ctx.saved_tensors
         alpha = ctx.alpha
         limit = ctx.limit
 
-        print(grad_output.shape, activation_out.shape)
-        d_w_down = grad_output.T @ activation_out
-        d_act = grad_output.T @ w_down
+        d_act = grad_output @ w_down
 
         # Gradient through activation
-        d_gate, d_up = swiglu_backward(gate, up, d_act, alpha, limit)
+        d_gate, d_up, activation_out = swiglu_backward(gate, up, d_act, alpha, limit)
 
-        d_w_gate = d_gate.T @ x
-        d_w_up = d_up.T @ x
+        d_w_down = grad_output.reshape(-1, grad_output.shape[-1]).T @ activation_out.reshape(-1, activation_out.shape[-1])
 
-        d_x = d_gate.T @ w_gate + d_up.T @ w_up
+        d_w_gate = d_gate.reshape(-1, d_gate.shape[-1]).T @ x.reshape(-1, x.shape[-1])
+        d_w_up = d_up.reshape(-1, d_up.shape[-1]).T @ x.reshape(-1, x.shape[-1])
+
+        d_x = torch.empty_like(x).reshape(-1, x.shape[-1])
+        torch.matmul(d_gate.reshape(-1, d_gate.shape[-1]), w_gate, out=d_x)
+        d_x.addmm_(d_up.reshape(-1, d_up.shape[-1]), w_up)
+        d_x = d_x.reshape(x.shape)
 
         # Gradients for w_down, w_gate, w_up, dx
         return d_x, d_w_gate, d_w_up, d_w_down, None, None
