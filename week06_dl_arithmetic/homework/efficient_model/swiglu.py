@@ -152,19 +152,19 @@ class MemoryEfficientSwiGLUMLP(torch.autograd.Function):
         alpha = ctx.alpha
         limit = ctx.limit
 
-        d_act = grad_output @ w_down
+        d_act = grad_output @ w_down.to(grad_output.dtype)
 
         # Gradient through activation
         d_gate, d_up, activation_out = swiglu_backward(gate, up, d_act, alpha, limit)
 
         d_w_down = grad_output.reshape(-1, grad_output.shape[-1]).T @ activation_out.reshape(-1, activation_out.shape[-1])
 
-        d_w_gate = d_gate.reshape(-1, d_gate.shape[-1]).T @ x.reshape(-1, x.shape[-1])
-        d_w_up = d_up.reshape(-1, d_up.shape[-1]).T @ x.reshape(-1, x.shape[-1])
+        d_w_gate = d_gate.reshape(-1, d_gate.shape[-1]).T @ x.reshape(-1, x.shape[-1]).to(d_gate.dtype)
+        d_w_up = d_up.reshape(-1, d_up.shape[-1]).T @ x.reshape(-1, x.shape[-1]).to(d_up.dtype)
 
-        d_x = torch.empty_like(x).reshape(-1, x.shape[-1])
-        torch.matmul(d_gate.reshape(-1, d_gate.shape[-1]), w_gate, out=d_x)
-        d_x.addmm_(d_up.reshape(-1, d_up.shape[-1]), w_up)
+        d_x = torch.empty_like(x).reshape(-1, x.shape[-1]).to(d_gate.dtype)
+        torch.matmul(d_gate.reshape(-1, d_gate.shape[-1]), w_gate.to(d_gate.dtype), out=d_x)
+        d_x.addmm_(d_up.reshape(-1, d_up.shape[-1]), w_up.to(d_up.dtype))
         d_x = d_x.reshape(x.shape)
 
         # Gradients for w_down, w_gate, w_up, dx

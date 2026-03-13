@@ -228,9 +228,15 @@ class MultiHeadAttention(nn.Module):
 
         # TODO: Replace vanilla attention with Flash Attention
 
-        scale = 1.0 / math.sqrt(self.head_dim)
-        
+        original_dtype = qkv.dtype
+        if qkv.dtype not in [torch.float16, torch.bfloat16]: # because RuntimeError: FlashAttention only support fp16 and bf16 data type
+            qkv = qkv.bfloat16()
+
         out = flash_attn_qkvpacked_func(qkv, causal=True, dropout_p=self.config.dropout if self.training else 0)
+
+        if original_dtype != qkv.dtype:
+            out = out.to(original_dtype)
+
         out = out.contiguous().view(B, S, H)
         out = self.out_proj(out)
 

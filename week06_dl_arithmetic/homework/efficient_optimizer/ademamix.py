@@ -38,7 +38,7 @@ def ademamix_foreach_fn(
     # alphas: Tensor,
     # beta3: Tensor,
     beta1_t: Tensor, beta2_t: Tensor,
-    lr: float, lmbda: float, eps: float,
+    lr: Tensor, lmbda: float, eps: float,
     step: Tensor,
     alpha_warmup: Optional[int],
     beta3_warmup: Optional[int],
@@ -179,6 +179,8 @@ class AdEMAMix(Optimizer):
 
             group_step += 1
             
+            lr_t = torch.tensor(lr, device='cpu', dtype=torch.float64)
+
             ademamix_foreach_fn(
                 params=params,
                 grads=grads,
@@ -187,7 +189,7 @@ class AdEMAMix(Optimizer):
                 exp_avg_sqs=exp_avg_sqs,
                 beta1_t=beta1_t,
                 beta2_t=beta2_t,
-                lr=lr, lmbda=lmbda, eps=eps,
+                lr=lr_t, lmbda=lmbda, eps=eps,
                 step=group_step,
                 alpha_warmup=alpha_warmup,
                 beta3_warmup=beta3_warmup,
