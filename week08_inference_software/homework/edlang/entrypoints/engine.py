@@ -145,7 +145,9 @@ class InferenceEngine:
             ], dim=1)
 
             kv_cache = self._prepare_past_key_values_batch(not_finished)
-            outputs = self.model(input_ids=current_tokens, attention_mask=attention_mask, past_key_values=kv_cache, use_cache=True)
+            
+            position_ids = torch.tensor([[req.current_len] for req in not_finished], device=self.model.device)
+            outputs = self.model(input_ids=current_tokens, attention_mask=attention_mask, past_key_values=kv_cache, use_cache=True, position_ids=position_ids)
             next_tokens = torch.argmax(outputs.logits[:, -1, :], dim=-1)
             
             for layer_idx in range(len(outputs.past_key_values.key_cache)):

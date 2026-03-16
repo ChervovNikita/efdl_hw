@@ -53,15 +53,15 @@ class EDLangScheduler:
         return request.request_id
     
     def step(self):
-        decode_result = None
-        prefill_result = None
-
         # TODO: Implement step method
         # TODO: First decide how many requests to prefill
         # TODO: Then do decode
         # TODO: Update metrics and inner state
-        raise NotImplementedError("Implement step method")
-    
+
+        batch_size, prefilled_requests = self._prefill_step()
+        if batch_size == 0: # either prefill or decode
+            batch_size, decoded_requests = self._decode_step()
+
     def _decode_step(self):        
         active = [req for req in self.active_requests if not req.is_finished]
         
@@ -69,15 +69,26 @@ class EDLangScheduler:
             return None
         
         # TODO: Do decode for all active requests
-        raise NotImplementedError("Implement decode step")
+        batch_size = min(self.config.max_batch_size, len(active))
+        if batch_size > 0:
+            requests = active[:batch_size]
+            self.engine.decode(requests)
+            return batch_size, requests
+        return batch_size, []
     
     def _prefill_step(self):
         if not self.waiting_queue:
             return None
         
         # Do prefill for some (which?) number of requests
-        raise NotImplementedError("Implement prefill step")
-    
+        batch_size = self._decide_prefill_batch_size()
+        if batch_size > 0:
+            requests = [self.waiting_queue.popleft() for _ in range(batch_size)]
+            self.engine.prefill(requests)
+            self.active_requests.extend(requests)
+            return batch_size, requests
+        return batch_size, []
+
     def _decide_prefill_batch_size(self):
         # The most simple policy: prefill only if there are no active requests
         num_active = len([r for r in self.active_requests if not r.is_finished])
@@ -98,3 +109,4 @@ class EDLangScheduler:
     def clear(self):
         self.waiting_queue = deque()
         self.active_requests = []
+
