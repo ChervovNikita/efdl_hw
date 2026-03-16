@@ -12,7 +12,7 @@ import torch
 
 @dataclass
 class SchedulerConfig:
-    max_batch_size: int = 2
+    max_batch_size: int = 4
     max_waiting_requests: int = 100
     prefill_timeout_ms: float = 50.0
     enable_metrics: bool = False
@@ -33,6 +33,7 @@ class EDLangScheduler:
 
         self.next_request_id = 0
         self.metrics_manager = MetricManager(enable_metrics=self.config.enable_metrics)
+        self.current_step = 0
 
     def add_request(
         self,
@@ -104,7 +105,7 @@ class EDLangScheduler:
         return batch_size, []
 
     def _decide_prefill_batch_size(self):
-        policy = 'prefill_first'
+        policy = 'fair_time'
         if policy == 'baseline':
             num_active = len([r for r in self.active_requests if not r.is_finished])
             
@@ -114,7 +115,20 @@ class EDLangScheduler:
                 return 1
         elif policy == 'prefill_first':
             # print(len(self.waiting_queue))
-            return min(1, len(self.waiting_queue))
+            return min(self.config.max_batch_size, len(self.waiting_queue))
+        elif policy == 'fair_time':
+            self.current_step += 1
+            num_active = len([r for r in self.active_requests if not r.is_finished])
+            if num_active == 0 or self.current_step % 40 == 0:
+                return min(self.config.max_batch_size, len(self.waiting_queue))
+            return 0
+        elif policy == 'wait_batch':
+            num_active = len([r for r in self.active_requests if not r.is_finished])
+            if num_active < self.config.max_batch_size:
+                return min(self.config.max_batch_size - num_active, len(self.waiting_queue))
+            return 0
+            
+
 
     
     def get_finished_requests(self) -> List[Request]:

@@ -74,7 +74,7 @@ class InferenceEngine:
         #   - Save state: current_len, input_ids (real part only), attention_mask, past_key_values
         #   - Set generated_tokens, num_generated, is_finished
         prompts = [req.prompt for req in requests]
-        inputs = self.tokenizer(prompts, padding=True, return_tensors="pt").to(self.model.device)
+        inputs = self.tokenizer(prompts, padding=True, truncation=True, max_length=self.model_config.max_prompt_length, return_tensors="pt").to(self.model.device)
         outputs = self.model(**inputs, use_cache=True)
         logits = outputs.logits
         real_seq_lens = inputs.attention_mask.sum(dim=1)
@@ -88,7 +88,7 @@ class InferenceEngine:
             requests[i].generated_tokens = [next_tokens[i].item()]
             requests[i].generated_text = self.get_generated_text(requests[i])
             requests[i].num_generated = 1
-            requests[i].is_finished = next_tokens[i] == self.tokenizer.eos_token_id or requests[i].num_generated >= requests[i].max_new_tokens
+            requests[i].is_finished = next_tokens[i].item() == self.tokenizer.eos_token_id or requests[i].num_generated >= requests[i].max_new_tokens
 
         return BatchResult(
             request_ids=[req.request_id for req in requests],
@@ -166,7 +166,7 @@ class InferenceEngine:
                 
                 requests[idx].generated_tokens = requests[idx].generated_tokens + [next_tokens[i].item()]
                 requests[idx].num_generated = len(requests[idx].generated_tokens)
-                requests[idx].is_finished = next_tokens[i] == self.tokenizer.eos_token_id or requests[idx].num_generated >= requests[idx].max_new_tokens
+                requests[idx].is_finished = next_tokens[i].item() == self.tokenizer.eos_token_id or requests[idx].num_generated >= requests[idx].max_new_tokens
                 seq_len = attention_mask[i].sum().item()
                 requests[idx].past_key_values = self._get_past_for_request(outputs.past_key_values, i, int(seq_len))
                 requests[idx].attention_mask = torch.ones(int(seq_len), device=self.model.device, dtype=attention_mask.dtype)

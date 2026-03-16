@@ -47,7 +47,7 @@ class MetricManager:
             self.avg_len = sum(lens) / len(lens)
             self.avg_len_count = len(lens)
         else:
-            self.avg_len = (self.avg_len * self.avg_len_count + sum(lens) / len(lens)) / (self.avg_len_count + len(lens))
+            self.avg_len = (self.avg_len * self.avg_len_count + sum(lens)) / (self.avg_len_count + len(lens))
             self.avg_len_count += len(lens)
 
     def calculate_rps(self):
