@@ -8,7 +8,7 @@ import os
 
 from edlang.entrypoints.engine import Request, InferenceEngine, BatchResult
 from edlang.managers.metric_manager import MetricManager
-
+import torch
 
 @dataclass
 class SchedulerConfig:
@@ -49,6 +49,7 @@ class EDLangScheduler:
         self.next_request_id += 1
 
         self.metrics_manager.update_waiting_queue_num(len(self.waiting_queue))
+        self.metrics_manager.add_requests_prefill([request.request_id])
         
         return request.request_id
     
@@ -58,15 +59,27 @@ class EDLangScheduler:
         # TODO: Then do decode
         # TODO: Update metrics and inner state
 
+        self.metrics_manager.flush_tpot()
+
         batch_size, prefilled_requests = self._prefill_step()
-        if batch_size == 0: # either prefill or decode
+        self.metrics_manager.update_waiting_queue_num(len(self.waiting_queue))
+        self.metrics_manager.remove_requests_prefill([request.request_id for request in prefilled_requests])
+   
+        if not prefilled_requests: # do either prefill or decode
+            self.metrics_manager.started_decoding()
             batch_size, decoded_requests = self._decode_step()
+            self.metrics_manager.update_active_requests_num(len(self.active_requests))
+            self.metrics_manager.finished_decoding(len(decoded_requests))
+        
+        self.metrics_manager.flush_tpot()
+        self.metrics_manager.calculate_throughtput_tokens_per_second()
+        self.metrics_manager.calculate_rps()
 
     def _decode_step(self):        
         active = [req for req in self.active_requests if not req.is_finished]
         
         if not active:
-            return None
+            return None, []
         
         # TODO: Do decode for all active requests
         batch_size = min(self.config.max_batch_size, len(active))
@@ -78,7 +91,7 @@ class EDLangScheduler:
     
     def _prefill_step(self):
         if not self.waiting_queue:
-            return None
+            return None, []
         
         # Do prefill for some (which?) number of requests
         batch_size = self._decide_prefill_batch_size()
@@ -100,6 +113,7 @@ class EDLangScheduler:
     
     def get_finished_requests(self) -> List[Request]:
         finished = [req for req in self.active_requests if req.is_finished]
+        self.metrics_manager.update_lens([len(req.generated_tokens) for req in finished])
         self.active_requests = [req for req in self.active_requests if not req.is_finished]
         return finished
     
@@ -109,4 +123,3 @@ class EDLangScheduler:
     def clear(self):
         self.waiting_queue = deque()
         self.active_requests = []
-
