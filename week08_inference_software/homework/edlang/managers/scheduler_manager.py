@@ -12,7 +12,7 @@ import torch
 
 @dataclass
 class SchedulerConfig:
-    max_batch_size: int = 8 
+    max_batch_size: int = 2
     max_waiting_requests: int = 100
     prefill_timeout_ms: float = 50.0
     enable_metrics: bool = False
@@ -85,6 +85,7 @@ class EDLangScheduler:
         batch_size = min(self.config.max_batch_size, len(active))
         if batch_size > 0:
             requests = active[:batch_size]
+            # print(len(requests))
             self.engine.decode(requests)
             return batch_size, requests
         return batch_size, []
@@ -103,13 +104,18 @@ class EDLangScheduler:
         return batch_size, []
 
     def _decide_prefill_batch_size(self):
-        # The most simple policy: prefill only if there are no active requests
-        num_active = len([r for r in self.active_requests if not r.is_finished])
-        
-        if num_active > 0:
-            return 0
-        else:
-            return 1
+        policy = 'prefill_first'
+        if policy == 'baseline':
+            num_active = len([r for r in self.active_requests if not r.is_finished])
+            
+            if num_active > 0:
+                return 0
+            else:
+                return 1
+        elif policy == 'prefill_first':
+            # print(len(self.waiting_queue))
+            return min(1, len(self.waiting_queue))
+
     
     def get_finished_requests(self) -> List[Request]:
         finished = [req for req in self.active_requests if req.is_finished]
